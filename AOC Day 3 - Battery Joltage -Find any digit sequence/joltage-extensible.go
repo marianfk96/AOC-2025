@@ -8,7 +8,7 @@ import (
 
 func main() {
 
-	file, err := os.Open("C:/Users/Marianna/Downloads/banks.txt")
+	file, err := os.Open("filePath")
 	if err != nil {
 		fmt.Println("Error reading the file")
 		return
