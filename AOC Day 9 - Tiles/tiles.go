@@ -10,6 +10,11 @@ import (
 	"strings"
 )
 
+type Result struct {
+	area Area
+	ok   bool
+}
+
 type Point struct {
 	X, Y int
 }
@@ -24,7 +29,7 @@ type GridLimits struct {
 }
 
 func main() {
-	file, err := os.Open("fl.txt")
+	file, err := os.Open("filePath")
 	if err != nil {
 		fmt.Println("Error reading the file")
 		return
@@ -75,123 +80,138 @@ func main() {
 		}
 	}
 	fmt.Println(maxArea)
-	// 1. create a rectangle grid out of the grid limits we found earlier
-	// 2. add the red tiles -> make sure to normalize points by substracting minX, minY
-	// 3. add X between # in rows -> rows will ALWAYS end on max width (maxY)
-	// 4. after filling the outline between # in the same row, fill X in colums by keeping track in which row we
-	// encountered the last #
-	// 5. Now that we have the outline we can fill the polygon with X and return the points that create it
-	gridlimits := GridLimits{minX, maxX, minY, maxY}
-	grid := createEmptyGrid(gridlimits)
-	// add red points to grid making sure to 'shift' their coordinates
-	grid = addRedTiles(points, grid, minX, minY)
-	for i, row := range grid {
-		grid[i] = addXToRow(grid, row, i)
-	}
-	grid = addXToColumn(grid)
-	grid, polygonPoints := fillPolygon(grid, minX, minY)
-	// 1. sort the areas slice
-	// 2. beggining from greatest area, find the opposite points from the points that created it
-	// 3. if they are contained within polygonPoints that's the max width we can create
+	// PART 2
+	//I have an ordered set of points that create the vertices of a polygon in a 2d grid
+	//I have a slice of areas created by at least 2 of those points (i keep track of them)
+	// I can calculate opposite points to find all edges of the rectangle that creates this area.
+	// Then use ray casting algorithm to whether those points are contained inside the polygon (or intersect wiht the perimeter)
+	// Those areas will form my candidates
 	sort.Slice(areas, func(i, j int) bool {
 		return areas[i].area > areas[j].area
 	})
-	maxContainedArea := -1
+	candidates := []Area{}
 	for _, area := range areas {
-		oppX, oppY := findOppositePoints(area.FROM, area.TO)
-		if isPartOfPolygon(oppX, polygonPoints) && isPartOfPolygon(oppY, polygonPoints) {
-			maxContainedArea = int(area.area)
-			break
+		oppA, oppB := findOppositePoints(area.FROM, area.TO)
+		// ray casting algorithm for all edges
+		if pointInPolygon(area.FROM, points) && pointInPolygon(area.TO, points) && pointInPolygon(oppA, points) && pointInPolygon(oppB, points) {
+			candidates = append(candidates, area)
+		}
+	}
+	workers := 6
+	areaCh := make(chan Area, len(candidates))
+	resultCh := make(chan Result, workers)
+
+	for _, a := range candidates {
+		areaCh <- a
+	}
+	close(areaCh)
+
+	for w := 0; w < workers; w++ {
+		go func() {
+			for area := range areaCh {
+				minX := min(area.FROM.X, area.TO.X)
+				maxX := max(area.FROM.X, area.TO.X)
+				minY := min(area.FROM.Y, area.TO.Y)
+				maxY := max(area.FROM.Y, area.TO.Y)
+				// perimeter is contained then the whole rectangle is contained
+				if rectangleContained(minX, maxX, minY, maxY, points) {
+					resultCh <- Result{area, true}
+					return
+				}
+			}
+			resultCh <- Result{Area{}, false}
+		}()
+	}
+
+	// collect results and find max, as all workers might have returned a valid result
+	maxContainedArea := -1
+	for range workers {
+		r := <-resultCh
+		if r.ok && int(r.area.area) > maxContainedArea {
+			maxContainedArea = int(r.area.area)
 		}
 	}
 
 	fmt.Println(maxContainedArea)
 }
 
-func fillPolygon(grid [][]rune, minX, minY int) ([][]rune, []Point) {
-	points := []Point{}
-	for row := 0; row < len(grid); row++ {
-		// fill in the points inside our outline
-		inside := false
-		for col := 0; col < len(grid[0]); col++ {
-			if grid[row][col] == 'X' || grid[row][col] == '#' {
-				points = append(points, Point{col + minX, row + minY})
-				// stop filling once we reach the ende
-				inside = !inside
-				continue
-			}
-			// fill with X
-			if inside && grid[row][col] == '.' {
-				grid[row][col] = 'X'
-				points = append(points, Point{row + minY, col + minX})
-			}
+func rectangleContained(minX, maxX, minY, maxY int, polygon []Point) bool {
+	// check x-axis
+	for x := minX; x <= maxX; x++ {
+		if !pointInPolygon(Point{x, minY}, polygon) ||
+			!pointInPolygon(Point{x, maxY}, polygon) {
+			return false
 		}
 	}
-	return grid, points
-}
-
-func addXToRow(grid [][]rune, row []rune, rowIndex int) []rune {
-	for i, val := range row {
-		if val == '#' {
-			for j := i + 1; j < len(row); j++ {
-				if row[j] == '#' {
-					break
-				}
-				row[j] = 'X'
-			}
+	// check y-axis
+	for y := minY; y <= maxY; y++ {
+		if !pointInPolygon(Point{minX, y}, polygon) ||
+			!pointInPolygon(Point{maxX, y}, polygon) {
+			return false
 		}
 	}
-	return row
+	return true
 }
 
-func addXToColumn(grid [][]rune) [][]rune {
-	for col := 0; col < len(grid[0]); col++ {
-		lastHash := -1
-		for row := 0; row < len(grid); row++ {
-			// keep track of where we saw the last #
-			if grid[row][col] == '#' {
-				if lastHash >= 0 {
-					// fill column with X between the position of last seen # and current row
-					for k := lastHash + 1; k < row; k++ {
-						grid[k][col] = 'X'
-					}
-				}
-				lastHash = row
-			}
+func pointInPolygon(p Point, points []Point) bool {
+	for i := 0; i < len(points); i++ {
+		p1 := points[i]
+		// last line to check is final point matched with the first one  -> this one closes the polygon
+		var p2 Point
+		if i < len(points)-1 {
+			p2 = points[i+1]
+		} else {
+			p2 = points[0]
 		}
-	}
-	return grid
-}
-
-func createEmptyGrid(limits GridLimits) [][]rune {
-	width := limits.MAX_X - limits.MIN_X + 1
-	height := limits.MAX_Y - limits.MIN_Y + 1
-	grid := make([][]rune, height)
-	for i := 0; i < height; i++ {
-		grid[i] = make([]rune, width)
-		for j := 0; j < width; j++ {
-			grid[i][j] = '.'
-		}
-	}
-	return grid
-}
-
-func addRedTiles(points []Point, grid [][]rune, minX, minY int) [][]rune {
-	for _, point := range points {
-		row := point.Y - minY
-		col := point.X - minX
-		grid[row][col] = '#'
-	}
-	return grid
-}
-
-func isPartOfPolygon(point Point, polygonPOints []Point) bool {
-	for _, p := range polygonPOints {
-		if point.X == p.X && point.Y == p.Y {
+		if pointOnPerimeter(p, p1, p2) {
 			return true
 		}
 	}
+	// ray casting
+	// point is inside polygon if ray inmtersect odd number of times -> start with inside = false, on intersection inise = !inside
+	inside := false
+	j := len(points) - 1 // index of previous point, we start with the last one
+	for i := 0; i < len(points); i++ {
+		pcurr := points[i]
+		pprev := points[j]
+		// detect intersections and switch inside
+		if (pcurr.Y <= p.Y && p.Y < pprev.Y) || (pprev.Y <= p.Y && p.Y < pcurr.Y) {
+			if p.X < (pprev.X-pcurr.X)*(p.Y-pcurr.Y)/(pprev.Y-pcurr.Y)+pcurr.X {
+				inside = !inside
+			}
+		}
+		j = i // assign j for the next iteration
+	}
+	return inside
+}
+
+func pointOnPerimeter(p, pointA, pointB Point) bool {
+	// 2 checks -> p must be on the line defined by a and b. P must be between a and b
+	// cross-product test for collinearilty -> (x2​−x1​)(y3​−y1​)−(y2​−y1​)(x3​−x1​)=0
+	collinear := (pointB.X-pointA.X)*(p.Y-pointA.Y) == (pointB.Y-pointA.Y)*(p.X-pointA.X)
+	// early exity if not on the same line
+	if !collinear {
+		return false
+	}
+	// since collineas , check that p is between a and b
+	if min(pointA.X, pointB.X) <= p.X && p.X <= max(pointA.X, pointB.X) && min(pointA.Y, pointB.Y) <= p.Y && p.Y <= max(pointA.Y, pointB.Y) {
+		return true
+	}
 	return false
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func findOppositePoints(pointA, pointB Point) (Point, Point) {
